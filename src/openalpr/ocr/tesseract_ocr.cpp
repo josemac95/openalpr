@@ -92,7 +92,14 @@ namespace alpr
           bool dontcare;
           int fontindex = 0;
           int pointsize = 0;
-          const char* fontName = ri->WordFontAttributes(&dontcare, &dontcare, &dontcare, &dontcare, &dontcare, &dontcare, &pointsize, &fontindex);
+
+
+          const char* fontName;
+          if (symbol != nullptr)
+            fontName = ri->WordFontAttributes(&dontcare, &dontcare, &dontcare, &dontcare, &dontcare, &dontcare, &pointsize, &fontindex);
+          else
+            fontName = nullptr;
+
 
           // Ignore NULL pointers, spaces, and characters that are way too small to be valid
           if(symbol != 0 && symbol[0] != SPACE_CHAR_CODE && pointsize >= config->ocrMinFontSize)
