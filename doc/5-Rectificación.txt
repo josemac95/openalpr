@@ -1,0 +1,110 @@
+void LicensePlateCandidate::recognize()
+{
+	// Si es multilinea los datos de la pipeline
+	pipeline_data->isMultiline = config->multiline;
+
+	// Region expandida
+	Rect expandedRegion = this->pipeline_data->regionOfInterest;
+
+	// Region expandida en gris
+	pipeline_data->crop_gray = Mat(this->pipeline_data->grayImg, expandedRegion);
+	// Redimensiona la imagen al tamaño de la plantilla en la configuracion
+	resize(pipeline_data->crop_gray, pipeline_data->crop_gray, Size(config->templateWidthPx, config->templateHeightPx));
+
+	///////////////////////////////
+	// 3. ANALISIS DE CARACTERES //
+	///////////////////////////////
+	CharacterAnalysis textAnalysis(pipeline_data);
+
+	// Si esta descalificada termina
+	if (pipeline_data->disqualified)
+		return;
+	
+	//////////////////////////////
+	// 4. DELIMITA LA MATRICULA //
+	//////////////////////////////
+	EdgeFinder edgeFinder(pipeline_data);
+	
+	// Las esquinas de la matricula son las de los bordes
+	pipeline_data->plate_corners = edgeFinder.findEdgeCorners();
+
+	// Si esta descalificada termina
+	if (pipeline_data->disqualified)
+		return;
+
+	//////////////////////
+	// 5. RECTIFICACION //
+	//////////////////////
+	// Temporizador
+	timespec startTime;
+	getTimeMonotonic(&startTime);
+
+	// Computa la matriz de transformacion para ir de la imagen actual a las esquinas de la matricula
+	Transformation imgTransform(this->pipeline_data->grayImg, pipeline_data->crop_gray, expandedRegion);
+	// Tamaño del recorte
+	Size cropSize = imgTransform.getCropSize(pipeline_data->plate_corners,
+					Size(pipeline_data->config->ocrImageWidthPx, pipeline_data->config->ocrImageHeightPx));
+	// Matriz de transformacion
+	Mat transmtx = imgTransform.getTransformationMatrix(pipeline_data->plate_corners, cropSize);
+
+	// Recorta la matricula de la imagen original en color despues de quitar el prewarp
+	vector<Point2f> projectedPoints = pipeline_data->prewarp->projectPoints(pipeline_data->plate_corners, true);
+	pipeline_data->color_deskewed = Mat::zeros(cropSize, pipeline_data->colorImg.type());
+	std::vector<cv::Point2f> deskewed_points;
+	deskewed_points.push_back(cv::Point2f(0,0));
+	deskewed_points.push_back(cv::Point2f(pipeline_data->color_deskewed.cols,0));
+	deskewed_points.push_back(cv::Point2f(pipeline_data->color_deskewed.cols,pipeline_data->color_deskewed.rows));
+	deskewed_points.push_back(cv::Point2f(0,pipeline_data->color_deskewed.rows));
+	cv::Mat color_transmtx = cv::getPerspectiveTransform(projectedPoints, deskewed_points);
+	cv::warpPerspective(pipeline_data->colorImg, pipeline_data->color_deskewed, color_transmtx, pipeline_data->color_deskewed.size());
+
+	// Si tiene mas de dos canales
+	if (pipeline_data->color_deskewed.channels() > 2)
+	{
+		// Hace una copia en gris para que el procesamiento sea mas rapido
+		// Lo guarda en el recorte que se habia hecho
+		cv::cvtColor(pipeline_data->color_deskewed, pipeline_data->crop_gray, CV_BGR2GRAY);
+	}
+	else
+	{
+		// Copia la imagen en gris al recorte que se habia hecho
+		pipeline_data->color_deskewed.copyTo(pipeline_data->crop_gray);
+	}
+
+	// Si esta activo el debug general
+	if (this->config->debugGeneral)
+		// Muestra la imagen en gris
+		displayImage(config, "quadrilateral", pipeline_data->color_deskewed);
+
+	// Aplica la transformacion de la perspectiva a los objetos TexLine
+	// para que coincidan con el nuevo recorte rectificado de la matricula
+	vector<TextLine> newLines;
+	for (unsigned int i = 0; i < pipeline_data->textLines.size(); i++)
+	{
+		vector<Point2f> textArea = imgTransform.transformSmallPointsToBigImage(pipeline_data->textLines[i].textArea);
+		vector<Point2f> linePolygon = imgTransform.transformSmallPointsToBigImage(pipeline_data->textLines[i].linePolygon);
+
+		vector<Point2f> textAreaRemapped;
+		vector<Point2f> linePolygonRemapped;
+
+		textAreaRemapped = imgTransform.remapSmallPointstoCrop(textArea, transmtx);
+		linePolygonRemapped = imgTransform.remapSmallPointstoCrop(linePolygon, transmtx);
+
+		newLines.push_back(TextLine(textAreaRemapped, linePolygonRemapped, pipeline_data->crop_gray.size()));
+	}
+
+	// Reasigna los objetos TexLine
+	pipeline_data->textLines.clear();
+	for (unsigned int i = 0; i < newLines.size(); i++)
+		pipeline_data->textLines.push_back(newLines[i]);
+
+	// Si esta activo el modo debug del tiempo
+	if (config->debugTiming)
+	{
+		// Fin temporizador
+		timespec endTime;
+		getTimeMonotonic(&endTime);
+		// Imprime el tiempo de rectificacion
+		cout << "deskew Time: " << diffclock(startTime, endTime) << "ms." << endl;
+	}
+}

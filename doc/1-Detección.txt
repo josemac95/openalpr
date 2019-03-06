@@ -1,0 +1,150 @@
+vector<PlateRegion> Detector::detect(Mat frame, std::vector<cv::Rect> regionsOfInterest)
+{
+	// Imagen en gris
+	Mat frame_gray;
+
+	// Si el frame esta en color
+	if (frame.channels() > 2)
+	{
+		// Convierta a gris
+		cvtColor( frame, frame_gray, CV_BGR2GRAY );
+	}
+	else
+	{
+		// Si esta en gris, copia el frame
+		frame.copyTo(frame_gray);
+	}
+
+	// Aplica la mascara de deteccion si ha sido especificada
+	if (detector_mask.mask_loaded)
+		frame_gray = detector_mask.apply_mask(frame_gray);
+
+	// Establece la mascara debug
+	Mat mask_debug_img;
+	// Si la mascara de deteccion esta especificada
+	// y el modo debug para la deteccion activado
+	if (detector_mask.mask_loaded && config->debugDetector)
+	{
+		// Copia la imagen gris en la mascara debug
+		frame_gray.copyTo(mask_debug_img);
+		// Copia la imagen en gris, convirtiendo el color a BGR en la mascara
+		cvtColor(frame_gray, mask_debug_img, CV_GRAY2BGR);
+	}
+
+	// Regiones detectadas
+	vector<PlateRegion> detectedRegions;
+	for (int i = 0; i < regionsOfInterest.size(); i++)
+	{
+		// Region de interes
+		Rect roi = regionsOfInterest[i];
+
+		// Si esta la mascara de deteccion
+		if (detector_mask.mask_loaded)
+			// Ajusta la ROI para que quede dentro
+			roi = detector_mask.getRoiInsideMask(roi);
+
+		// Si modo debug del detector activo y si esta la mascara de deteccion
+		if (detector_mask.mask_loaded && config->debugDetector)
+			// Dibuja las ROI en la mascara debug
+			rectangle(mask_debug_img, roi, Scalar(0,255,255), 3);
+
+		// Si las dimensiones de la ROI son mas pequeñas que el minimo posible de las matriculas
+		if ((roi.width < config->minPlateSizeWidthPx) || 
+			(roi.height < config->minPlateSizeHeightPx))
+			// Se la salta
+			continue;
+
+		// Crea la imagen recortada segun ROI en gris
+		Mat cropped = frame_gray(roi);
+
+		// Dimensiones de la imagen recortada
+		int w = cropped.size().width;
+		int h = cropped.size().height;
+		// Desplazamiento interno de la ROI
+		int offset_x = roi.x;
+		int offset_y = roi.y;
+		// Factor de escala respecto a los maximos de la entrada del detector en config
+		// Por defecto 1280 x 768
+		float scale_factor = computeScaleFactor(w, h);
+
+		// Si no es 1, es demasiado grande
+		if (scale_factor != 1.0)
+			// Redimensiona la imagen haciendola mas pequeña
+			resize(cropped, cropped, Size(w * scale_factor, h * scale_factor));
+
+		// Ancho maximo de la matricula. El porcentaje por defecto es 100
+		float maxWidth = ((float) w) * (config->maxPlateWidthPercent / 100.0f) * scale_factor;
+		// Altura maxima de la matricula. El porcentaje por defecto es 100
+		float maxHeight = ((float) h) * (config->maxPlateHeightPercent / 100.0f) * scale_factor;
+		// Dimensiones maximas y minimas de las matriculas
+		Size minPlateSize(config->minPlateSizeWidthPx, config->minPlateSizeHeightPx);
+		Size maxPlateSize(maxWidth, maxHeight);
+
+		// Encuentra las matriculas en la imagen recortada
+		// indicando los tamaños minimos y maximos de matricula
+		//////////
+		// CORE //
+		//////////
+		// En detectorcpu.cpp
+		//
+		// plate_cascade.detectMultiScale( frame, plates, config->detection_iteration_increase, config->detectionStrictness,
+        //                              CV_HAAR_DO_CANNY_PRUNING,
+        //                             //0|CV_HAAR_SCALE_IMAGE,
+        //                              min_plate_size, max_plate_size );
+		//
+		vector<Rect> allRegions = find_plates(cropped, minPlateSize, maxPlateSize);
+
+		// Agrega las regiones encontradas de las matriculas
+		for( unsigned int i = 0; i < allRegions.size(); i++ )
+		{
+			// Modifica los valores con el factor de escala
+			allRegions[i].x = (allRegions[i].x / scale_factor);
+			allRegions[i].y = (allRegions[i].y / scale_factor);
+			allRegions[i].width = allRegions[i].width / scale_factor;
+			allRegions[i].height = allRegions[i].height / scale_factor;
+
+			// Asegura que la region no tiene dimensiones incorrectas
+			allRegions[i] = expandRect(allRegions[i], 0, 0, w, h);
+
+			// Modifica las coordenadas con el offset de la ROI en la imagen
+			allRegions[i].x = allRegions[i].x + offset_x;
+			allRegions[i].y = allRegions[i].y + offset_y;
+		}
+
+		// Para cada region
+		// Check the rectangles and make sure that they're definitely not masked
+		vector<Rect> regions_not_masked;
+		for (unsigned int i = 0; i < allRegions.size(); i++)
+		{
+			// Si no esta la mascara de deteccion cargada
+			if (detector_mask.mask_loaded)
+			{
+				// Si las regiones no estan enmascaradas
+				if (!detector_mask.region_is_masked(allRegions[i]))
+					// Las guarda
+					regions_not_masked.push_back(allRegions[i]);
+			}
+			else
+				// Las guarda
+				regions_not_masked.push_back(allRegions[i]);
+		}
+
+		// Las regiones guardadas se agregan, estan ordenadas
+		vector<PlateRegion> orderedRegions = aggregateRegions(regions_not_masked);
+
+		// Para cada region ordenada
+		for (unsigned int j = 0; j < orderedRegions.size(); j++)
+			// La guarda en las regiones detectadas
+			detectedRegions.push_back(orderedRegions[j]);
+	}
+
+	// Si esta la mascara cargada y los modo debug del detector y la muestra de imagenes
+	if (detector_mask.mask_loaded && config->debugDetector && config->debugShowImages)
+	{
+		// Muestra la imagen de la mascara
+		imshow("Detection Mask", mask_debug_img);
+	}
+
+	// Devuelve las regiones detectadas
+	return detectedRegions;
+}

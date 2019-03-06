@@ -1,0 +1,208 @@
+void CharacterSegmenter::segment()
+{
+	// Temporizador
+	timespec startTime;
+	getTimeMonotonic(&startTime);
+
+	// Si modo debug del segmentador
+	if (this->config->debugCharSegmenter)
+	{
+		// Muestra la imagen de los thresholds
+		displayImage(config, "CharacterSegmenter  Thresholds", drawImageDashboard(pipeline_data->thresholds, CV_8U, 3));
+	}
+
+	// Mascara del filtro de los bordes
+	Mat edge_filter_mask = Mat::zeros(pipeline_data->thresholds[0].size(), CV_8U);
+	// Invierte la mascara
+	bitwise_not(edge_filter_mask, edge_filter_mask);
+
+	// Para cada linea de texto
+	for (unsigned int lineidx = 0; lineidx < pipeline_data->textLines.size(); lineidx++)
+	{
+		// Borde superior
+		this->top = pipeline_data->textLines[lineidx].topLine;
+		// Borde inferior
+		this->bottom = pipeline_data->textLines[lineidx].bottomLine;
+
+		// Altura media de los caracteres en la linea
+		float avgCharHeight = pipeline_data->textLines[lineidx].lineHeight;
+		// Relacion altura-anchura
+		float height_to_width_ratio = pipeline_data->config->charHeightMM[lineidx] / pipeline_data->config->charWidthMM[lineidx];
+		// Anchura correspondiente
+		float avgCharWidth = avgCharHeight / height_to_width_ratio;
+
+		// Si modo debug del segmentador
+		if (config->debugCharSegmenter)
+		{
+			// Imprime los valores calculados
+			cout << "LINE " << lineidx << ": avgCharHeight: " << avgCharHeight << " - height_to_width_ratio: " << height_to_width_ratio << endl;
+			cout << "LINE " << lineidx << ": avgCharWidth: " << avgCharWidth << endl;
+		}
+		
+		// Elimina los contornos pequeños
+		//////////
+		// CORE //
+		//////////
+		removeSmallContours(pipeline_data->thresholds, avgCharHeight, pipeline_data->textLines[lineidx]);
+
+		// Encuentra las regiones de los caracteres con un analisis de histograma
+
+		// Temporizador
+		timespec startTime;
+		getTimeMonotonic(&startTime);
+
+		// Coleccion de histogramas
+		vector<Mat> allHistograms;
+
+		// Lineas de los contenedores
+		vector<Rect> lineBoxes;
+		
+		// Para cada threshold
+		for (unsigned int i = 0; i < pipeline_data->thresholds.size(); i++)
+		{
+			// Mascara del histograma
+			Mat histogramMask = Mat::zeros(pipeline_data->thresholds[i].size(), CV_8U);
+			
+			// Poligono convexo en la mascara del histograma de la linea de texto
+			fillConvexPoly(histogramMask, pipeline_data->textLines[lineidx].linePolygon.data(), 				
+							pipeline_data->textLines[lineidx].linePolygon.size(), Scalar(255,255,255));
+
+			// Obtiene el histograma vertical
+			//////////
+			// CORE //
+			//////////
+			HistogramVertical vertHistogram(pipeline_data->thresholds[i], histogramMask);
+
+			// Puntuacion
+			float score = 0;
+			// Los contenedores de los caracteres se obtienen del histograma
+			// indicando los valores de altura y anchura medios
+			vector<Rect> charBoxes = getHistogramBoxes(vertHistogram, avgCharWidth, avgCharHeight, &score);
+
+			// Para cada contenedor
+			for (unsigned int z = 0; z < charBoxes.size(); z++)
+				// Guarda las lineas de los contenedores
+				lineBoxes.push_back(charBoxes[z]);
+		}
+
+		// Si debug del tiempo
+		if (config->debugTiming)
+		{
+			// Fin tiempo
+			timespec endTime;
+			getTimeMonotonic(&endTime);
+			// Imprime el tiempo para la segmentacion y el histograma
+			cout << "  -- Character Segmentation Create and Score Histograms Time: " << diffclock(startTime, endTime) << "ms." << endl;
+		}
+
+		// Contenedores candidatos
+		vector<Rect> candidateBoxes = getBestCharBoxes(pipeline_data->thresholds[0], lineBoxes, avgCharWidth);
+
+		// Si debug del segmentador
+		if (this->config->debugCharSegmenter)
+		{
+			// Para cada threshold
+			for (unsigned int i = 0; i < pipeline_data->thresholds.size(); i++)
+			{
+				// Imagen limpia
+				Mat cleanImg = Mat::zeros(pipeline_data->thresholds[i].size(), pipeline_data->thresholds[i].type());
+				// Mascara de los contenedores
+				Mat boxMask = getCharBoxMask(pipeline_data->thresholds[i], candidateBoxes);
+				// Copia los thresholds a la imagen limpia
+				pipeline_data->thresholds[i].copyTo(cleanImg);
+				// Unifica la mascara de los contenedores y los thresholds
+				bitwise_and(cleanImg, boxMask, cleanImg);
+				// Pasa a BGR
+				cvtColor(cleanImg, cleanImg, CV_GRAY2BGR);
+
+				// Para cada contenedor candidato
+				for (unsigned int c = 0; c < candidateBoxes.size(); c++)
+					// Dibuja el rectangulo correspondiente en la imagen unificada
+					rectangle(cleanImg, candidateBoxes[c], Scalar(0, 255, 0), 1);
+				// Guarda el resultado
+				imgDbgCleanStages.push_back(cleanImg);
+			}
+		}
+
+		// Temporizador
+		getTimeMonotonic(&startTime);
+
+		// Mascara de los bordes
+		//////////
+		// CORE //
+		//////////
+		Mat edge_mask = filterEdgeBoxes(pipeline_data->thresholds, candidateBoxes, avgCharWidth, avgCharHeight);
+		// Unifica la mascara de los bordes y la del filtro de los bordes
+		bitwise_and(edge_filter_mask, edge_mask, edge_filter_mask);
+
+		// Combina los contenedores cerrados en los contenedores candidatos 
+		candidateBoxes = combineCloseBoxes(candidateBoxes);
+
+		// Elimina los contenedores vacios
+		candidateBoxes = filterMostlyEmptyBoxes(pipeline_data->thresholds, candidateBoxes);
+		
+		// Guarda los contenedores (region de caracteres)
+		pipeline_data->charRegions.push_back(candidateBoxes);
+		// Para cada contenedor
+		for (unsigned int cboxidx = 0; cboxidx < candidateBoxes.size(); cboxidx++)
+			// Guarda la region de caracteres (todas en plano, sin importar la linea de texto)
+			pipeline_data->charRegionsFlat.push_back(candidateBoxes[cboxidx]);
+
+		// Si modo debug tiempo
+		if (config->debugTiming)
+		{
+			// Fin temporizador
+			timespec endTime;
+			getTimeMonotonic(&endTime);
+			// Imprime el tiempo de la limpieza de contenedores en la segmentacion
+			cout << "  -- Character Segmentation Box cleaning/filtering Time: " << diffclock(startTime, endTime) << "ms." << endl;
+		}
+
+		// Si modo debug del segmentador
+		if (this->config->debugCharSegmenter)
+		{
+			// Imagen de los thresholds
+			Mat imgDash = drawImageDashboard(pipeline_data->thresholds, CV_8U, 3);
+			displayImage(config, "Segmentation after cleaning", imgDash);
+
+			// Imagen de la segmentacion general
+			Mat generalDash = drawImageDashboard(this->imgDbgGeneral, this->imgDbgGeneral[0].type(), 2);
+			displayImage(config, "Segmentation General", generalDash);
+
+			// Imagen de la segmentacion (limpia)
+			Mat cleanImgDash = drawImageDashboard(this->imgDbgCleanStages, this->imgDbgCleanStages[0].type(), 3);
+			displayImage(config, "Segmentation Clean Filters", cleanImgDash);
+		}
+	}
+
+	// Para cada threshold
+	for (unsigned int i = 0; i < pipeline_data->thresholds.size(); i++)
+	{
+		// Aplica la mascara del filtro de bordes
+		bitwise_and(pipeline_data->thresholds[i], edge_filter_mask, pipeline_data->thresholds[i]);
+	}
+
+	// Todas las regiones combinadas
+	vector<Rect> all_regions_combined;
+	// Para cada conjunto de region de caracteres
+	for (unsigned int lidx = 0; lidx < pipeline_data->charRegions.size(); lidx++)
+	{
+		// Para cada region de caracteres
+		for (unsigned int boxidx = 0; boxidx < pipeline_data->charRegions[lidx].size(); boxidx++)
+			// Guarda todas las regiones combinadas
+			all_regions_combined.push_back(pipeline_data->charRegions[lidx][boxidx]);
+	}
+	// Elimina imperfecciones de las regiones de caracteres
+	//////////
+	// CORE //
+	//////////
+	cleanCharRegions(pipeline_data->thresholds, all_regions_combined);
+
+	// Si debug tiempo
+	if (config->debugTiming)
+	{
+		timespec endTime;
+		getTimeMonotonic(&endTime);
+		cout << "Character Segmenter Time: " << diffclock(startTime, endTime) << "ms." << endl;
+	}
+}

@@ -1,0 +1,122 @@
+void PostProcess::analyze(string templateregion, int topn)
+{
+	// Temporizador
+	timespec startTime;
+	getTimeMonotonic(&startTime);
+
+	// Lista de posiciones sin caracter
+	for (int i = letters.size() -1; i >= 0; i--)
+	{
+		// Si el tamaño de la letra es 0
+		if (letters[i].size() == 0)
+		{
+			// No hay letra, guarda la posicion
+			unknownCharPositions.push_back(i);
+		}
+	}
+
+	// Si no hay letras, termina
+	if (letters.size() == 0)
+		return;
+
+	// Para cada posicion de letra
+	for (int i = 0; i < letters.size(); i++)
+	{
+		// Si hay letras en esa posicion
+		if (letters[i].size() > 0)
+			// Ordena las letras segun su puntuacion
+			std::stable_sort(letters[i].begin(), letters[i].end(), letterCompare);
+	}
+
+	// Si modo debug del post-procesado
+	if (this->config->debugPostProcess)
+	{
+		// Para cada posicion de letra
+		for (int i = 0; i < letters.size(); i++)
+		{
+			// Para cada letra en la posicion
+			for (int j = 0; j < letters[i].size(); j++)
+				// Imprime todas las letras
+				cout << "PostProcess Line " << letters[i][j].line_index << " Letter: " << letters[i][j].charposition << " " << letters[i][j].letter << " -- score: " << letters[i][j].totalscore << " -- occurrences: " << letters[i][j].occurrences << endl;
+		}
+	}
+
+	// Fin temporizador
+	timespec permutationStartTime;
+	getTimeMonotonic(&permutationStartTime);
+
+	// Hace las permutaciones
+	findAllPermutations(templateregion, topn);
+
+	// Si modo debug tiempo
+	if (config->debugTiming)
+	{
+		// Fin temporizador
+		timespec permutationEndTime;
+		getTimeMonotonic(&permutationEndTime);
+		// Imprime el tiempo para las permutaciones
+		cout << " -- PostProcess Permutation Time: " << diffclock(permutationStartTime, permutationEndTime) << "ms." << endl;
+	}
+
+	// Si hay posibilidades en las permutaciones
+	if (allPossibilities.size() > 0)
+	{
+		// Caracteres de la mejor permutacion
+		bestChars = allPossibilities[0].letters;
+		// Para cada permutacion
+		for (int z = 0; z < allPossibilities.size(); z++)
+		{
+			// Si coincide con el patron
+			if (allPossibilities[z].matchesTemplate)
+			{
+				// Se quedan como mejor permutacion ya que estan ordenadas segun puntuacion
+				bestChars = allPossibilities[z].letters;
+				// Termina
+				break;
+			}
+		}
+
+		// La maxima puntuacion es la media de las mejores puntuaciones por posicion
+		float maxPercentScore = calculateMaxConfidenceScore();
+		// La maxima puntuacion real es la de la primera posibilidad
+		float highestRelativeScore = (float) allPossibilities[0].totalscore;
+		// Para cada posibilidad
+		for (int i = 0; i < allPossibilities.size(); i++)
+		{
+			// Ajusta la puntuacion de confianza a un valor porcentual
+			allPossibilities[i].totalscore = maxPercentScore * (allPossibilities[i].totalscore / highestRelativeScore);
+		}
+	}
+
+	// Si modo debug del post-procesado
+	if (this->config->debugPostProcess)
+	{
+		// Para cada posibilidad
+		for (int i = 0; i < allPossibilities.size(); i++)
+		{
+			// Imprime las posibilidades
+			cout << "Top " << topn << " Possibilities: " << allPossibilities[i].letters << " :\t" << allPossibilities[i].totalscore;
+			// Si es la mejor, la señala
+			if (allPossibilities[i].letters == bestChars)
+				cout << " <--- ";
+			cout << endl;
+		}
+		// Imprime el total de posibilidades
+		cout << allPossibilities.size() << " total permutations" << endl;
+	}
+
+	// Si modo debug tiempo
+	if (config->debugTiming)
+	{
+		// Fin temporizador
+		timespec endTime;
+		getTimeMonotonic(&endTime);
+		// Imprime el tiempo del post-procesado
+		cout << "PostProcess Time: " << diffclock(startTime, endTime) << "ms." << endl;
+	}
+	
+	// Si modo debug del post-procesado
+	if (this->config->debugPostProcess)
+		// Imprime el tiempo del analisis completo del post-procesado
+		cout << "PostProcess Analysis Complete: " << bestChars << " -- MATCH: " << matchesTemplate << endl;
+}

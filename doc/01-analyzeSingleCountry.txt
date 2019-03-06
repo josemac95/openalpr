@@ -1,0 +1,284 @@
+AlprFullDetails AlprImpl::analyzeSingleCountry(cv::Mat colorImg, cv::Mat grayImg, std::vector<cv::Rect> warpedRegionsOfInterest)
+{
+	AlprFullDetails response;
+
+	// Obtiene las herramientas de reconocimiento dado el pais establecido en la configuracion
+	AlprRecognizers country_recognizers = recognizers[config->country];
+	
+	// Temporizador
+	timespec startTime;
+	getTimeMonotonic(&startTime);
+
+	// Region de matriculas rectificada
+	vector<PlateRegion> warpedPlateRegions;
+	
+	// Encuentra todos los candidatos en la region
+	
+	// Si no hay que saltarse la deteccion
+	if (config->skipDetection == false)
+	{
+		/////////////////
+		// 1. DETECTOR //
+		/////////////////
+		// Detecta (por pais) las matriculas en las regiones de interes
+		warpedPlateRegions = country_recognizers.plateDetector->detect(grayImg, warpedRegionsOfInterest);
+	}
+	else
+	{
+		// Si se salta la fase de deteccion, en su lugar devuelve una lista
+		// de regiones de matricula basada en sus regiones de interes
+		for (unsigned int i = 0; i < warpedRegionsOfInterest.size(); i++)
+		{
+			// Region de matricula
+			PlateRegion pr;
+			// Rectangulo de la region es la region de interes
+			pr.rect = cv::Rect(warpedRegionsOfInterest[i]);
+			// Guarda las regiones de matriculas
+			warpedPlateRegions.push_back(pr);
+		}
+	}
+	
+	// Cola de regiones de matriculas
+	queue<PlateRegion> plateQueue;
+	// Para cada region
+	for (unsigned int i = 0; i < warpedPlateRegions.size(); i++)
+		// Mete en la cola las regiones
+		plateQueue.push(warpedPlateRegions[i]);
+
+	// Contador de matriculas
+	int platecount = 0;
+	// Mientras no este vacia
+	while(!plateQueue.empty())
+	{
+		// Obtiene la primera region
+		PlateRegion plateRegion = plateQueue.front();
+		plateQueue.pop();
+
+		// Configura los datos de la imagen para la pipeline
+		pipeline_data(colorImg, grayImg, plateRegion.rect, config);
+		// Establece la rectificacion previa
+		pipeline_data.prewarp = prewarp;
+
+		// Tiempo para el procesamiento de la matricula
+		timespec platestarttime;
+		getTimeMonotonic(&platestarttime);
+
+		// Inicializa la matricula para ser candidato
+		LicensePlateCandidate lp(&pipeline_data);
+
+		////////////////////////////
+		// ANALISIS DEL CANDIDATO //
+		////////////////////////////
+		lp.recognize();
+
+		// Matricula no detectada
+		bool plateDetected = false;
+		// Si esta descalificada y en modo debug
+		if (pipeline_data.disqualified && config->debugGeneral)
+		{
+			// Imprime la razon
+			cout << "Disqualify reason: " << pipeline_data.disqualify_reason << endl;
+		}
+		// Si no esta descalificada
+		if (!pipeline_data.disqualified)
+		{
+			// Resultados del analisis
+			AlprPlateResult plateResult;
+
+			// Pais de la matricula resultado
+			plateResult.country = config->country;
+
+			// Si solo hay un patron para la matricula, se utiliza
+			if (country_recognizers.ocr->postProcessor.getPatterns().size() == 1)
+				plateResult.region = country_recognizers.ocr->postProcessor.getPatterns()[0];
+			// Si no, se utiliza el por defecto
+			else
+				plateResult.region = defaultRegion;
+
+			// Confianza en la region obtenida
+			plateResult.regionConfidence = 0;
+			// Identificador de la matricula
+			plateResult.plate_index = platecount++;
+			// Establece el top N
+			plateResult.requested_topn = topN;
+
+			// Si se usa prewarp (rectificacion previa) se remapea las esquinas de la matricula
+			vector<Point2f> cornerPoints = pipeline_data.plate_corners;
+			cornerPoints = prewarp->projectPoints(cornerPoints, true);
+
+			// Para cada esquina de la matricula se asigna la esquina rectificada
+			for (int pointidx = 0; pointidx < 4; pointidx++)
+			{
+				plateResult.plate_points[pointidx].x = (int) cornerPoints[pointidx].x;
+				plateResult.plate_points[pointidx].y = (int) cornerPoints[pointidx].y;
+			}
+
+			//////////////////////////////
+			// 6.5. DETECTOR DE ESTADOS //
+			//////////////////////////////
+			// Si no hay que saltarse la deteccion del estado
+			#ifndef SKIP_STATE_DETECTION
+			// Si se ha detectado la region y el detector esta cargado
+			if (detectRegion && country_recognizers.stateDetector->isLoaded())
+			{
+				// Estados candidatos
+				std::vector<StateCandidate> state_candidates = country_recognizers.stateDetector->detect(
+																pipeline_data.color_deskewed.data,
+																pipeline_data.color_deskewed.elemSize(),
+																pipeline_data.color_deskewed.cols,
+																pipeline_data.color_deskewed.rows);
+
+				// Si ha encontrado estados
+				if (state_candidates.size() > 0)
+				{
+					// Guarda en el resultado de la matricula el primer estado
+					plateResult.region = state_candidates[0].state_code;
+					// Guarda tambien la confianza en ese estado
+					plateResult.regionConfidence = (int) state_candidates[0].confidence;
+				}
+			}
+			#endif
+
+			// Si el estado detectado no es valido
+			if (plateResult.region.length() > 0 && country_recognizers.ocr->postProcessor.regionIsValid(plateResult.region) == false)
+			{
+				// Imprime que no se ha proporcionado un patron valido
+				std::cerr << "Invalid pattern provided: " << plateResult.region << std::endl;
+				std::cerr << "Valid patterns are located in the " << config->country << ".patterns file" << std::endl;
+			}
+
+			////////////
+			// 7. OCR //
+			////////////
+			// Hace el reconocimiento de caracteres OCR
+			country_recognizers.ocr->performOCR(&pipeline_data);
+			
+			//////////////////////
+			// 8. POSTPROCESADO //
+			//////////////////////
+			// Realiza el postprocesamiento (analiza resultados)
+			country_recognizers.ocr->postProcessor.analyze(plateResult.region, topN);
+
+			// Tiempo para los resultados
+			timespec resultsStartTime;
+			getTimeMonotonic(&resultsStartTime);
+
+			// Obtiene los resultados del OCR y el postprocesado
+			const vector<PPResult> ppResults = country_recognizers.ocr->postProcessor.getResults();
+
+			// Identificador de la mejor placa
+			int bestPlateIndex = 0;
+
+			// Matriz de transformacion de caracteres
+			cv::Mat charTransformMatrix = getCharacterTransformMatrix(&pipeline_data);
+			// Se ha seleccionado la placa
+			bool isBestPlateSelected = false;
+			// Para cada placa
+			for (unsigned int pp = 0; pp < ppResults.size(); pp++)
+			{
+				// Si no se ha seleccionado la mejor matricula y coincide con el patron
+				if (isBestPlateSelected == false && ppResults[pp].matchesTemplate){
+					// Se guarda el identificador de la matricula
+					bestPlateIndex = plateResult.topNPlates.size();
+					// Se indica que se ha seleccionado la mejor
+					isBestPlateSelected = true;
+				}
+
+				// Placa o matricula
+				AlprPlate aplate;
+				// Caracteres de la placa
+				aplate.characters = ppResults[pp].letters;
+				// Confianza en la placa
+				aplate.overall_confidence = ppResults[pp].totalscore;
+				// Coincidencia con el patron
+				aplate.matches_template = ppResults[pp].matchesTemplate;
+
+				// Obtiene resultados concretos para cada caracter
+				for (unsigned int c_idx = 0; c_idx < ppResults[pp].letter_details.size(); c_idx++)
+				{
+					// Detalles del caracter
+					AlprChar character_details;
+					// Letra actual
+					Letter l = ppResults[pp].letter_details[c_idx];
+
+					// Guarda la letra actual en los detalles del caracter
+					character_details.character = l.letter;
+					// Guarda la confianza del caracter
+					character_details.confidence = l.totalscore;
+					// Guarda la posicion del caracter
+					cv::Rect char_rect = pipeline_data.charRegionsFlat[l.charposition];
+					// Puntos del caracter
+					std::vector<AlprCoordinate> charpoints = getCharacterPoints(char_rect, charTransformMatrix);
+					// Para cada punto del caracter
+					for (int cpt = 0; cpt < 4; cpt++)
+						// Guarda el punto (esquina)
+						character_details.corners[cpt] = charpoints[cpt];
+					// Guarda todos los detalles
+					aplate.character_details.push_back(character_details);
+				}
+				// Guarda la matricula en las N mejores
+				plateResult.topNPlates.push_back(aplate);
+			}
+
+			// Si el tamaño N es superior al identificador de la mejor placa
+			if (plateResult.topNPlates.size() > bestPlateIndex)
+			{
+				// Caracteristicas de la mejor matricula
+				AlprPlate bestPlate;
+				bestPlate.characters = plateResult.topNPlates[bestPlateIndex].characters;
+				bestPlate.matches_template = plateResult.topNPlates[bestPlateIndex].matches_template;
+				bestPlate.overall_confidence = plateResult.topNPlates[bestPlateIndex].overall_confidence;
+				bestPlate.character_details = plateResult.topNPlates[bestPlateIndex].character_details;
+
+				plateResult.bestPlate = bestPlate;
+			}
+
+			// Fin del temporizador
+			timespec plateEndTime;
+			getTimeMonotonic(&plateEndTime);
+			// Tiempo de procesamiento
+			plateResult.processing_time_ms = diffclock(platestarttime, plateEndTime);
+			// Si esta el modo debug del tiempo activo
+			if (config->debugTiming)
+			{
+				// Imprime el tiempo para la generacion del resultado
+				cout << "Result Generation Time: " << diffclock(resultsStartTime, plateEndTime) << "ms." << endl;
+			}
+
+			// Si hay placas en el top N
+			if (plateResult.topNPlates.size() > 0)
+			{
+				// Se ha detectado una metricula
+				plateDetected = true;
+				// Guarda en la respuesta los resultados de la matricula
+				response.results.plates.push_back(plateResult);
+			}
+		}
+
+		// Si no se ha detectado una matricula
+		if (!plateDetected)
+		{
+			// No es una placa valida
+			// Si la matricula tiene hijos, los envia al procesamiento
+			for (unsigned int childidx = 0; childidx < plateRegion.children.size(); childidx++)
+			{
+				// Mete en la cola de placas los hijos de la region de matricula
+				plateQueue.push(plateRegion.children[childidx]);
+			}
+		}
+	}
+
+	// Elimina la correccion de perspectiva previa
+	prewarp->projectPlateRegions(warpedPlateRegions, grayImg.cols, grayImg.rows, true);
+	// En la respuesta guarda las regiones
+	response.plateRegions = warpedPlateRegions;
+
+	// Fin temporizador
+	timespec endTime;
+	getTimeMonotonic(&endTime);
+	// Guarda el tiempo total de procesamiento
+	response.results.total_processing_time_ms = diffclock(startTime, endTime);
+
+	// Devuelve la respuesta
+	return response;
+}

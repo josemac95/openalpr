@@ -1,0 +1,409 @@
+std::vector<cv::Point2f> EdgeFinder::detection(bool high_contrast)
+{
+	// Coleccion de lineas de texto del analisis de caracteres
+	TextLineCollection tlc(pipeline_data->textLines);
+
+	// Esquinas
+	vector<Point> corners;
+
+	// Si el segmento de caracter es especialmente pequeño, expande el contenedor
+	if (high_contrast)
+	{
+		int expandX = (int) ((float) pipeline_data->crop_gray.cols) * 0.5f;
+		int expandY = (int) ((float) pipeline_data->crop_gray.rows) * 0.5f;
+		int w = pipeline_data->crop_gray.cols;
+		int h = pipeline_data->crop_gray.rows;
+
+		corners.push_back(Point(-1 * expandX, -1 * expandY));
+		corners.push_back(Point(expandX + w, -1 * expandY));
+		corners.push_back(Point(expandX + w, expandY + h));
+		corners.push_back(Point(-1 * expandX, expandY + h));
+	}
+	// Si es un segmento largo, se estima el conteno basado en la altura y posicion del caracter
+	else if (tlc.longerSegment.length > tlc.charHeight * 3)
+	{
+		// Ratio altura del caracter y ancho de la matricula
+		float charHeightToPlateWidthRatio = pipeline_data->config->plateWidthMM / pipeline_data->config->avgCharHeightMM;
+		// Acho de pixeles ideal de la matricula (+3% para no cortar ningun caracter)
+		float idealPixelWidth = tlc.charHeight *  (charHeightToPlateWidthRatio * 1.03);
+
+		// Ratio altura del caracter y altura de la matricula
+		float charHeightToPlateHeightRatio = pipeline_data->config->plateHeightMM / pipeline_data->config->avgCharHeightMM;
+		// Altura de pixeles ideal de la matricula
+		float idealPixelHeight = tlc.charHeight *  charHeightToPlateHeightRatio;
+
+		// Margen vertical
+		float verticalOffset = (idealPixelHeight * 1.5 / 2);
+		// Margen horizontal
+		float horizontalOffset = (idealPixelWidth * 1.25 / 2);
+		// La linea superior es una paralela a la linea central horizontal
+		LineSegment topLine = tlc.centerHorizontalLine.getParallelLine(verticalOffset);
+		// La linea inferior es una paralela a la linea central horizontal
+		LineSegment bottomLine = tlc.centerHorizontalLine.getParallelLine(-1 * verticalOffset);
+		// La linea de la izquierda es una paralela a la linea central vertical
+		LineSegment leftLine = tlc.centerVerticalLine.getParallelLine(-1 * horizontalOffset);
+		// La linea de la izquierda es una paralela a la linea central vertical
+		LineSegment rightLine = tlc.centerVerticalLine.getParallelLine(horizontalOffset);
+
+		// Las esquinas son las intersecciones
+		Point topLeft = topLine.intersection(leftLine);
+		Point topRight = topLine.intersection(rightLine);
+		Point botRight = bottomLine.intersection(rightLine);
+		Point botLeft = bottomLine.intersection(leftLine);
+
+		// Guarda las esquinas
+		corners.push_back(topLeft);
+		corners.push_back(topRight);
+		corners.push_back(botRight);
+		corners.push_back(botLeft);
+	}
+	// Si no es ni pequeño ni largo, expande el contenedor pero menos
+	else
+	{
+		int expandX = (int) ((float) pipeline_data->crop_gray.cols) * 0.15f;
+		int expandY = (int) ((float) pipeline_data->crop_gray.rows) * 0.15f;
+		int w = pipeline_data->crop_gray.cols;
+		int h = pipeline_data->crop_gray.rows;
+
+		corners.push_back(Point(-1 * expandX, -1 * expandY));
+		corners.push_back(Point(expandX + w, -1 * expandY));
+		corners.push_back(Point(expandX + w, expandY + h));
+		corners.push_back(Point(-1 * expandX, expandY + h));
+	}
+
+	// Recorta la imagen original usando las nuevas coordenadas
+	Transformation imgTransform(pipeline_data->grayImg, pipeline_data->crop_gray, pipeline_data->regionOfInterest);
+	// Esquinas remapeadas
+	vector<Point2f> remappedCorners = imgTransform.transformSmallPointsToBigImage(corners);
+
+	// Tamaño del recorte
+	Size cropSize = imgTransform.getCropSize(remappedCorners, 
+					Size(pipeline_data->config->templateWidthPx, pipeline_data->config->templateHeightPx));
+
+	// Matriz de transformacion correspondiente al mapeado de las esquinas
+	Mat transmtx = imgTransform.getTransformationMatrix(remappedCorners, cropSize);
+	// Nuevo recorte basado en la matriz y el tamaño del recorte
+	Mat newCrop = imgTransform.crop(cropSize, transmtx);
+
+	// Remapea las coordenadas de las lineas de texto al nuevo recorte
+	vector<TextLine> newLines;
+	for (unsigned int i = 0; i < pipeline_data->textLines.size(); i++)
+	{
+		// Area de texto y lineas remapeadas usando las nuevas coordenadas
+		vector<Point2f> textArea = imgTransform.transformSmallPointsToBigImage(pipeline_data->textLines[i].textArea);
+		vector<Point2f> linePolygon = imgTransform.transformSmallPointsToBigImage(pipeline_data->textLines[i].linePolygon);
+
+		vector<Point2f> textAreaRemapped;
+		vector<Point2f> linePolygonRemapped;
+
+		// Area de texto y lineas remapeadas al nuevo recorte
+		textAreaRemapped = imgTransform.remapSmallPointstoCrop(textArea, transmtx);
+		linePolygonRemapped = imgTransform.remapSmallPointstoCrop(linePolygon, transmtx);
+		
+		// Guarda las lineas de texto mapeadas
+		newLines.push_back(TextLine(textAreaRemapped, linePolygonRemapped, newCrop.size()));
+	}
+
+	// Esquinas de la matricula
+	vector<Point> smallPlateCorners;
+
+	// Si el segmento de caracter es pequeño
+	if (high_contrast)
+	{
+		// Deteccion de alto contraste de las nuevas lineas de texto en el recorte
+		//////////
+		// CORE //
+		//////////
+		smallPlateCorners = highContrastDetection(newCrop, newLines);
+	}
+	// Si es normal
+	else
+	{
+		// Deteccion de las nuevas lineas de texto en el recorte
+		//////////
+		// CORE //
+		//////////
+		smallPlateCorners = normalDetection(newCrop, newLines);
+	}
+
+	// Obtiene las mejores esquinas
+	std::vector<Point2f> imgArea;
+	imgArea.push_back(Point2f(0, 0));
+	imgArea.push_back(Point2f(newCrop.cols, 0));
+	imgArea.push_back(Point2f(newCrop.cols, newCrop.rows));
+	imgArea.push_back(Point2f(0, newCrop.rows));
+	Mat newCropTransmtx = imgTransform.getTransformationMatrix(imgArea, remappedCorners);
+
+	// Esquinas de la matricula
+	vector<Point2f> cornersInOriginalImg;
+
+	// Si se han encontrado esquinas
+	if (smallPlateCorners.size() > 0)
+		// Transforma las mejores esquinas a la imagen original
+		cornersInOriginalImg = imgTransform.remapSmallPointstoCrop(smallPlateCorners, newCropTransmtx);
+
+	// Devuelve las esquinas de la matricula
+	return cornersInOriginalImg;
+}
+
+
+////////////
+// CORE 1 //
+////////////
+
+
+vector<cv::Point> EdgeFinder::highContrastDetection(Mat newCrop, vector<TextLine> newLines)
+{
+	// Esquinas de la matricula
+	vector<Point> smallPlateCorners;
+
+	// Si modo debug
+	if (pipeline_data->config->debugGeneral)
+		// Deteccion de bordes de alto contraste
+		std::cout << "Performing high-contrast edge detection" << std::endl;
+
+	// Operacion morfologica. Encuentra el rectangulo blanco mas grande que mejor coincide con el area de caracteres
+	
+	// Tamaño
+	int morph_size = 3;
+	// Elemento con forma de rectangulo
+	// Primer argumento es la forma: 0 rect, 1 cross, 2 ellipse
+	Mat closureElement = getStructuringElement( 2,
+							Size( 2 * morph_size + 1, 2* morph_size + 1 ),
+							Point( morph_size, morph_size ) );
+
+	// Operacion closing (dilation + erosion)
+	morphologyEx(newCrop, newCrop, MORPH_CLOSE, closureElement);
+	// Operacion opening (erosion + dilation)
+	morphologyEx(newCrop, newCrop, MORPH_OPEN, closureElement);
+
+	// Threshold del recorte
+	Mat thresholded_crop;
+	threshold(newCrop, thresholded_crop, 80, 255, cv::THRESH_OTSU);
+
+	// Contornos
+	vector<vector<Point> > contours;
+	findContours(thresholded_crop, contours, RETR_EXTERNAL, CV_CHAIN_APPROX_SIMPLE );
+
+	// Area minima de los contornos
+	float MIN_AREA = 0.05 * newCrop.cols * newCrop.rows;
+	// Para cada contorno
+	for (unsigned int i = 0; i < contours.size(); i++)
+	{
+		// Si el area es mas pequeña que la minima, siguiente
+		if (contourArea(contours[i]) < MIN_AREA)
+			continue;
+		
+		// Puntos suavizados
+		vector<Point> smoothedPoints;
+		// Aproxima a una curva poligonal de epsilon 1
+		approxPolyDP(contours[i], smoothedPoints, 1, true);
+
+		// Rectangulo de area minima con los puntos suavizados
+		RotatedRect rrect = minAreaRect(smoothedPoints);
+
+		// Puntos del rectangulo
+		Point2f rect_points[4];
+		rrect.points(rect_points);
+
+		// Ordena los puntos (poligono)
+		vector<Point> sorted_polygon_points = sortPolygonPoints(rect_points, newCrop.size());
+
+		// Ancho del poligono
+		float polygon_width = (distanceBetweenPoints(sorted_polygon_points[0], sorted_polygon_points[1]) + 
+								distanceBetweenPoints(sorted_polygon_points[3], sorted_polygon_points[2])) / 2;
+		// Alto del poligono
+		float polygon_height = (distanceBetweenPoints(sorted_polygon_points[2], sorted_polygon_points[1]) + 
+								distanceBetweenPoints(sorted_polygon_points[3], sorted_polygon_points[0])) / 2;
+
+		// Crea un rectangulo interior
+		int x_offset = newCrop.cols * 0.1;
+		int y_offset = newCrop.rows * 0.1;
+		Rect insideRect(Point(x_offset, y_offset), Point(newCrop.cols - x_offset, newCrop.rows - y_offset));
+
+		// Comprueba que todos los puntos quedan dentro
+		bool isoutside = false;
+		for (unsigned int ptidx = 0; ptidx < sorted_polygon_points.size(); ptidx++)
+		{
+			if (!insideRect.contains(sorted_polygon_points[ptidx]))
+				isoutside = true;
+		}
+		// Si toca los bordes, descalificada
+		if (isoutside)
+			continue;
+
+		// Si el centro no esta centrado, descalificada
+		float MAX_CLOSENESS_TO_EDGE_PERCENT = 0.2;
+		if (rrect.center.x < (newCrop.cols * MAX_CLOSENESS_TO_EDGE_PERCENT) || 
+			rrect.center.x > (newCrop.cols - (newCrop.cols * MAX_CLOSENESS_TO_EDGE_PERCENT)) ||
+			rrect.center.y < (newCrop.rows * MAX_CLOSENESS_TO_EDGE_PERCENT) || 
+			rrect.center.y > (newCrop.rows - (newCrop.rows * MAX_CLOSENESS_TO_EDGE_PERCENT)))
+		{
+			continue;
+		}
+
+		// Asegura que el aspect ratio es similar al de una matricula
+		
+		// Aspect ratio
+		float aspect_ratio = polygon_width / polygon_height;
+		// Aspect ratio ideal
+		float ideal_aspect_ratio = pipeline_data->config->plateWidthMM / pipeline_data->config->plateHeightMM;
+		// Relacion entre aspect ratio
+		float ratio = ideal_aspect_ratio / aspect_ratio;
+		// Si no se parece, descalificada
+		if (ratio > 2 || ratio < 0.5)
+			continue;
+
+		// Asegura que las lineas de texto estan contenidas en el rectangulo
+
+		// Entorno del rectangulo
+		Rect rect_cover = rrect.boundingRect();
+		// Para cada linea de texto
+		for (unsigned int linenum = 0; linenum < newLines.size(); linenum++)
+		{
+			// Para cada area de texto
+			for (unsigned int r = 0; r < newLines[linenum].textArea.size(); r++)
+			{
+				// Si no esta contenida en el entorno del rectangulo
+				if (!rect_cover.contains(newLines[linenum].textArea[r]))
+				{
+					// Esta fuera
+					isoutside = true;
+					break;
+				}
+			}
+		}
+		
+		// Si esta fuera, descalificada
+		if (isoutside)
+			continue;
+
+	// Para cada esquina
+	for (int ridx = 0; ridx < 4; ridx++)
+		// Guarda las esquinas
+		smallPlateCorners.push_back(sorted_polygon_points[ridx]);
+	}
+	
+	// Devuelve las esquinas
+    return smallPlateCorners;
+}
+
+
+////////////
+// CORE 2 //
+////////////
+
+
+vector<Point> PlateCorners::findPlateCorners()
+{
+	// Si modo debug
+	if (pipelineData->config->debugPlateCorners)
+		// Encuentra las esquinas de la matricula
+		cout << "PlateCorners::findPlateCorners" << endl;
+
+	// Temporizador
+	timespec startTime;
+	getTimeMonotonic(&startTime);
+
+	// Lineas horizontales
+	int horizontalLines = this->plateLines->horizontalLines.size();
+	// Lineas verticales
+	int verticalLines = this->plateLines->verticalLines.size();
+
+	// Disposicion de las lineas horizontales
+	
+	// Para cada linea horizontal
+	for (int h1 = NO_LINE; h1 < horizontalLines; h1++)
+	{
+		// Para cada linea horizontal
+		for (int h2 = NO_LINE; h2 < horizontalLines; h2++)
+		{
+			// Si son iguales (que no sean nulas), siguiente
+			if (h1 == h2 && h1 != NO_LINE) continue;
+			// Valora las lineas horizontales como una posible region de matricula
+			this->scoreHorizontals(h1, h2);
+		}
+	}
+
+	// Disposicion de las lineas horizontales
+	
+	// Para cada linea vertical
+	for (int v1 = NO_LINE; v1 < verticalLines; v1++)
+	{
+		// Para cada linea vertical
+		for (int v2 = NO_LINE; v2 < verticalLines; v2++)
+		{
+			// Si son iguales (que no sean nulas), siguiente
+			if (v1 == v2 && v1 != NO_LINE) continue;
+			// Valora las lineas verticales como una posible region de matricula
+			this->scoreVerticals(v1, v2);
+		}
+	}
+
+	// Si debug de las esquinas de la matricula
+	if (pipelineData->config->debugPlateCorners)
+	{
+		// Comienza el proceso
+		cout << "Drawing debug stuff..." << endl;
+
+		// Imagen de las esquinas
+		Mat imgCorners = Mat(inputImage.size(), inputImage.type());
+		// Copia la imagen de entrada
+		inputImage.copyTo(imgCorners);
+		// Pasa a BGR
+		cvtColor(imgCorners, imgCorners, CV_GRAY2BGR);
+
+		// Para cada linea de texto
+		for (unsigned int linenum = 0; linenum < textLines.size(); linenum++)
+		{
+			// Para cada esquina
+			for (int i = 0; i < 4; i++)
+				// Dibuja un circulo en la esquina
+				circle(imgCorners, textLines[linenum].textArea[i], 2, Scalar(0, 0, 0));
+		}
+
+		// Dibuja las lineas de los mejores bordes
+		line(imgCorners, this->bestTop.p1, this->bestTop.p2, Scalar(255, 0, 0), 1, CV_AA);
+		line(imgCorners, this->bestRight.p1, this->bestRight.p2, Scalar(0, 0, 255), 1, CV_AA);
+		line(imgCorners, this->bestBottom.p1, this->bestBottom.p2, Scalar(0, 0, 255), 1, CV_AA);
+		line(imgCorners, this->bestLeft.p1, this->bestLeft.p2, Scalar(255, 0, 0), 1, CV_AA);
+
+		// Muestra la imagen
+		displayImage(pipelineData->config, "Winning top/bottom Boundaries", imgCorners);
+	}
+
+	// Comprueba si se han establecido los bordes laterales
+	if (bestLeft.p1.x == 0 && bestLeft.p1.y == 0 && bestLeft.p2.x == 0 && bestLeft.p2.y == 0)
+	{
+		// Descalificada
+		pipelineData->disqualified = true;
+		pipelineData->disqualify_reason = "platecorners did not find a left/right edge";
+	}
+	// Comprueba si se han establecido los bordes superior e inferior
+	else if (bestTop.p1.x == 0 && bestTop.p1.y == 0 && bestTop.p2.x == 0 && bestTop.p2.y == 0)
+	{
+		// Descalificada
+		pipelineData->disqualified = true;
+		pipelineData->disqualify_reason = "platecorners did not find a top/bottom edge";
+	}
+
+	// Las esquinas son la interseccion de los bordes
+	vector<Point> corners;
+	corners.push_back(bestTop.intersection(bestLeft));
+	corners.push_back(bestTop.intersection(bestRight));
+	corners.push_back(bestBottom.intersection(bestRight));
+	corners.push_back(bestBottom.intersection(bestLeft));
+
+	// Si modo debug tiempo
+	if (pipelineData->config->debugTiming)
+	{
+		// Fin tiempo de deteccion de las esquinas de la matricula
+		timespec endTime;
+		getTimeMonotonic(&endTime);
+		// Imprime el tiempo
+		cout << "Plate Corners Time: " << diffclock(startTime, endTime) << "ms." << endl;
+	}
+
+	// Devuelve las esquinas
+	return corners;
+}

@@ -1,0 +1,55 @@
+void OCR::performOCR(PipelineData* pipeline_data)
+{
+	// Temporizador
+	timespec startTime;
+	getTimeMonotonic(&startTime);
+
+	/////////////////////
+	// 6. SEGMENTACION //
+	/////////////////////
+	segment(pipeline_data);
+
+	// Reset del postprocesado
+	postProcessor.clear();
+
+	// Posicion absoluta de los caracteres
+	int absolute_charpos = 0;
+	// Para cada linea de texto
+	for (unsigned int line_idx = 0; line_idx < pipeline_data->textLines.size(); line_idx++)
+	{
+		// Reconocimiento OCR
+		//////////
+		// CORE //
+		//////////
+		// En tesseract_ocr.cpp
+		// Funcion recognize_line
+		//
+		std::vector<OcrChar> chars = recognize_line(line_idx, pipeline_data);
+
+		// Para cada caracter reconozido en la linea
+		for (uint32_t i = 0; i < chars.size(); i++)
+		{
+			// Para matriculas multilinea los indices de caracteres son secuenciales segun el numero de linea
+			int line_ordered_index = (line_idx * config->postProcessMaxCharacters) + chars[i].char_index;
+			// Añade letra (tienen en cuenta el threshold de confianza minimo)
+			//////////
+			// CORE //
+			//////////
+			// Para el post-procesado
+			//
+			postProcessor.addLetter(chars[i].letter, line_idx, line_ordered_index, chars[i].confidence);
+			// Aumenta la posicion absoluta
+			absolute_charpos++;
+		}
+	}
+
+	// Si modo debug tiempo
+	if (config->debugTiming)
+	{
+		// Fin temporizador
+		timespec endTime;
+		getTimeMonotonic(&endTime);
+		// Imprime el tiempo del OCR
+		std::cout << "OCR Time: " << diffclock(startTime, endTime) << "ms." << std::endl;
+	}
+}

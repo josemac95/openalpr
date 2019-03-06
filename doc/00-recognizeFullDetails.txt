@@ -1,0 +1,145 @@
+AlprFullDetails AlprImpl::recognizeFullDetails(cv::Mat img, std::vector<cv::Rect> regionsOfInterest)
+{
+	// Temporizador
+	timespec startTime;
+	getTimeMonotonic(&startTime);
+	int64_t start_time = getEpochTimeMs();
+
+	// Respuesta con los resultados
+	AlprFullDetails response;
+
+	// Corrige las ROIs en caso de que sobrepasen los limites de la imagen
+	for (unsigned int i = 0; i < regionsOfInterest.size(); i++)
+		regionsOfInterest[i] = expandRect(regionsOfInterest[i], 0, 0, img.cols, img.rows);
+	// Guarda las correcciones en la respuesta
+	for (unsigned int i = 0; i < regionsOfInterest.size(); i++)
+	{
+		response.results.regionsOfInterest.push_back(AlprRegionOfInterest(regionsOfInterest[i].x, regionsOfInterest[i].y, regionsOfInterest[i].width, regionsOfInterest[i].height));
+	}
+
+	// Si no hay datos en la imagen
+	if (!img.data)
+	{
+		// Imagen no valida
+		if (this->config->debugGeneral)
+			std::cerr << "Invalid image" << std::endl;
+		// Devuelve la respuesta
+		return response;
+	}
+
+	// Pasa la imagen a escala de grises
+	Mat grayImg = img;
+	// Si tiene mas de 2 canales (no esta en escala de grises)
+	if (img.channels() > 2)
+		cvtColor(img, grayImg, CV_BGR2GRAY);
+
+	// Transforma (prewarp) la imagen y las ROIs si esta configurado
+	std::vector<cv::Rect> warpedRegionsOfInterest = regionsOfInterest;
+	// Transforma la imagen si se indica en el fichero de configuracion
+	grayImg = prewarp->warpImage(grayImg);
+	// Transforma las ROIs
+	warpedRegionsOfInterest = prewarp->projectRects(regionsOfInterest, grayImg.cols, grayImg.rows, false);
+
+	// Itera sobre cada pais especificado (normalmente 1 solo)
+	ResultAggregator country_aggregator(MERGE_PICK_BEST, topN, config);
+	for (unsigned int i = 0; i < config->loaded_countries.size(); i++)
+	{
+		if (config->debugGeneral)
+			cout << "Analyzing: " << config->loaded_countries[i] << endl;
+		
+		// Establece el pais en la configuracion actual
+		config->setCountry(config->loaded_countries[i]);
+		
+		// Hace el analisis tantas veces como se indique en la configuracion
+		ResultAggregator iter_aggregator(MERGE_COMBINE, topN, config);
+		for (unsigned int iteration = 0; iteration < config->analysis_count; iteration++)
+		{
+			// Hace un retoque imperceptible cada vez para agregar cambios
+			Mat iteration_image = iter_aggregator.applyImperceptibleChange(grayImg, iteration);
+			///////////////////////
+			// ANALISIS POR PAIS //
+			///////////////////////
+			AlprFullDetails iter_results = analyzeSingleCountry(img, iteration_image, warpedRegionsOfInterest);
+			// Agrega los resultados por analisis
+			iter_aggregator.addResults(iter_results);
+		}
+		
+		// Guarda los datos en los resultados agregados por analisis
+		AlprFullDetails sub_results = iter_aggregator.getAggregateResults();
+		sub_results.results.epoch_time = start_time;
+		sub_results.results.img_width = img.cols;
+		sub_results.results.img_height = img.rows;
+		sub_results.results.regionsOfInterest = response.results.regionsOfInterest;
+
+		// Agrega los resultados por pais
+		country_aggregator.addResults(sub_results);
+	}
+	// Guarda los resultados agregados por pais en la respuesta
+	response = country_aggregator.getAggregateResults();
+
+	// Fin del temporizador
+	timespec endTime;
+	getTimeMonotonic(&endTime);
+	
+	// Debug del tiempo
+	if (config->debugTiming)
+	{
+		cout << "Total Time to process image: " << diffclock(startTime, endTime) << "ms." << endl;
+	}
+
+	// Debug general y de las imagenes (en el fichero de configuracion)
+	if (config->debugGeneral && config->debugShowImages)
+	{
+		// Dibuja cada ROI
+		for (unsigned int i = 0; i < regionsOfInterest.size(); i++)
+		{
+			rectangle(img, regionsOfInterest[i], Scalar(0,255,0), 2);
+		}
+		
+		// Dibuja el contenedor para cada region de matricula
+		for (unsigned int i = 0; i < response.plateRegions.size(); i++)
+		{
+			rectangle(img, response.plateRegions[i].rect, Scalar(0, 0, 255), 2);
+		}
+		
+		// Para cada matricula 
+		for (unsigned int i = 0; i < response.results.plates.size(); i++)
+		{
+			// Dibuja su contenedor
+			for (int z = 0; z < 4; z++)
+			{
+				AlprCoordinate* coords = response.results.plates[i].plate_points;
+				Point p1(coords[z].x, coords[z].y);
+				Point p2(coords[(z + 1) % 4].x, coords[(z + 1) % 4].y);
+				line(img, p1, p2, Scalar(255,0,255), 2);
+			}
+
+			// Dibuja los contenedores para cada caracter
+			for (int q = 0; q < response.results.plates[i].bestPlate.character_details.size(); q++)
+			{
+				AlprChar details = response.results.plates[i].bestPlate.character_details[q];
+				line(img, Point(details.corners[0].x, details.corners[0].y), Point(details.corners[1].x, details.corners[1].y), Scalar(0,255,0), 1);
+				line(img, Point(details.corners[1].x, details.corners[1].y), Point(details.corners[2].x, details.corners[2].y), Scalar(0,255,0), 1);
+				line(img, Point(details.corners[2].x, details.corners[2].y), Point(details.corners[3].x, details.corners[3].y), Scalar(0,255,0), 1);
+				line(img, Point(details.corners[3].x, details.corners[3].y), Point(details.corners[0].x, details.corners[0].y), Scalar(0,255,0), 1);
+			}
+		}
+
+		// Muestra la imagen
+		displayImage(config, "Main Image", img);
+
+		// Duerme
+		sleep_ms(1);
+	}
+
+	// Si hay pausa por frame
+	if (config->debugPauseOnFrame)
+	{
+		// Espera la pulsacion de una tecla
+		while ((char) cv::waitKey(50) == -1)
+		{}
+	}
+
+	// Devuelve la respuesta
+	return response;
+}
