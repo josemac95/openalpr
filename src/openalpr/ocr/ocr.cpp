@@ -19,6 +19,8 @@
 
 #include "ocr.h"
 
+using namespace std;
+
 namespace alpr
 {
   
@@ -37,8 +39,11 @@ namespace alpr
     timespec startTime;
     getTimeMonotonic(&startTime);
 
+    cout << "Inicio - FASE 6: SEGMENTACION (ocr.cpp)" << endl;
     segment(pipeline_data);
-    
+    cout << "Fin    - FASE 6: SEGMENTACION (ocr.cpp)" << endl;
+
+    cout << "Inicio - FASE 7: OCR (ocr.cpp)" << endl;
     postProcessor.clear();
 
 
@@ -63,5 +68,6 @@ namespace alpr
       getTimeMonotonic(&endTime);
       std::cout << "OCR Time: " << diffclock(startTime, endTime) << "ms." << std::endl;
     }
+    cout << "Fin    - FASE 7: OCR (ocr.cpp)" << endl;
   }
 }

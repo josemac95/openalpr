@@ -52,12 +52,12 @@ namespace alpr
     pipeline_data->crop_gray = Mat(this->pipeline_data->grayImg, expandedRegion);
     resize(pipeline_data->crop_gray, pipeline_data->crop_gray, Size(config->templateWidthPx, config->templateHeightPx));
 
-
     CharacterAnalysis textAnalysis(pipeline_data);
 
     if (pipeline_data->disqualified)
       return;
 
+    cout << "Inicio - FASE 4: DELIMITA MATRICULA (licenseplatecandidate.cpp)" << endl;
     EdgeFinder edgeFinder(pipeline_data);
 
     pipeline_data->plate_corners = edgeFinder.findEdgeCorners();
@@ -65,6 +65,9 @@ namespace alpr
     if (pipeline_data->disqualified)
       return;
 
+    cout << "Fin    - FASE 4: DELIMITA MATRICULA (licenseplatecandidate.cpp)" << endl;
+
+    cout << "Inicio - FASE 5: RECTIFICACION (licenseplatecandidate.cpp)" << endl;
     timespec startTime;
     getTimeMonotonic(&startTime);
 
@@ -134,9 +137,8 @@ namespace alpr
       cout << "deskew Time: " << diffclock(startTime, endTime) << "ms." << endl;
     }
 
-
+    cout << "Fin    - FASE 5: RECTIFICACION (licenseplatecandidate.cpp)" << endl;
 
   }
-
 
 }

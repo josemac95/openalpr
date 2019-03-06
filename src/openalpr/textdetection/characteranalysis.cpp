@@ -55,8 +55,11 @@ namespace alpr
       bitwise_not(pipeline_data->crop_gray, pipeline_data->crop_gray);
 
     pipeline_data->clearThresholds();
+    cout << "Inicio - FASE 2: BINARIZACION (characteranalysis.cpp)" << endl;
     pipeline_data->thresholds = produceThresholds(pipeline_data->crop_gray, config);
+    cout << "Fin    - FASE 2: BINARIZACION (characteranalysis.cpp)" << endl;
 
+    cout << "Inicio - FASE 3: ANALISIS CARACTERES (characteranalysis.cpp)" << endl;
     timespec contoursStartTime;
     getTimeMonotonic(&contoursStartTime);
 
@@ -272,6 +275,7 @@ namespace alpr
       tempDash.push_back(bestVal);
       displayImage(config, "Character Region Step 1 Thresholds", drawImageDashboard(tempDash, bestVal.type(), 3));
     }
+    cout << "Fin    - FASE 3: ANALISIS CARACTERES (characteranalysis.cpp)" << endl;
   }
 
 

@@ -226,7 +226,9 @@ namespace alpr
     // Find all the candidate regions
     if (config->skipDetection == false)
     {
+      cout << "Inicio - FASE 1: DETECTOR (alpr_impl.cpp)" << endl;
       warpedPlateRegions = country_recognizers.plateDetector->detect(grayImg, warpedRegionsOfInterest);
+      cout << "Fin    - FASE 1: DETECTOR (alpr_impl.cpp)" << endl;
     }
     else
     {
@@ -315,7 +317,10 @@ namespace alpr
         }
 
         country_recognizers.ocr->performOCR(&pipeline_data);
+
+        cout << "Inicio - FASE 8: POSTPROCESADO (alpr_impl.cpp)" << endl;
         country_recognizers.ocr->postProcessor.analyze(plateResult.region, topN);
+        cout << "Fin    - FASE 8: POSTPROCESADO (alpr_impl.cpp)" << endl;
 
         timespec resultsStartTime;
         getTimeMonotonic(&resultsStartTime);
@@ -326,6 +331,7 @@ namespace alpr
 
         cv::Mat charTransformMatrix = getCharacterTransformMatrix(&pipeline_data);
         bool isBestPlateSelected = false;
+
         for (unsigned int pp = 0; pp < ppResults.size(); pp++)
         {
 
@@ -371,6 +377,7 @@ namespace alpr
         timespec plateEndTime;
         getTimeMonotonic(&plateEndTime);
         plateResult.processing_time_ms = diffclock(platestarttime, plateEndTime);
+
         if (config->debugTiming)
         {
           cout << "Result Generation Time: " << diffclock(resultsStartTime, plateEndTime) << "ms." << endl;
